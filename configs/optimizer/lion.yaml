@@ -1,0 +1,8 @@
+name: lion
+lr: 3.0e-5          # Lion typically uses 3-10x smaller LR than Adam
+betas: [0.9, 0.99]
+weight_decay: 0.0
+gradient_clipping:
+  enabled: true
+  max_norm: 1.0
+  norm_type: 2

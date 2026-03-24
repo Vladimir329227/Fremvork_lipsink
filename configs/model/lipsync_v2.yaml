@@ -1,0 +1,18 @@
+# LipSync v2 — larger model for high-quality generation
+n_mels: 80
+audio_d_model: 512
+audio_heads: 8
+audio_layers: 12
+audio_embed_dim: 768
+
+identity_embed_dim: 768
+pretrained_identity: true
+
+gen_in_channels: 4
+gen_base_ch: 128
+gen_depth: 5
+
+disc_in_channels: 3
+disc_base_ch: 64
+
+sync_embed_dim: 512

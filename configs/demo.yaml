@@ -1,0 +1,47 @@
+# Demo configuration — CPU-optimised small model (~13 min training on i7-12700K)
+model:
+  n_mels: 80
+  audio_d_model: 128
+  audio_heads: 2
+  audio_layers: 3
+  audio_embed_dim: 256
+
+  identity_embed_dim: 256
+  pretrained_identity: false   # avoid torchvision download
+
+  gen_in_channels: 4
+  gen_base_ch: 32
+  gen_depth: 3
+
+  disc_in_channels: 3
+  disc_base_ch: 32
+
+  sync_embed_dim: 128
+
+optimizer:
+  name: adamw
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+  gradient_clipping:
+    enabled: true
+    max_norm: 1.0
+
+scheduler: {}   # no scheduler for short demo
+
+losses:
+  huber_delta: 1.0
+  adv_mode: hinge
+  w_recon: 10.0
+  w_perceptual: 0.0   # disabled — no torchvision required
+  w_sync: 0.0
+  w_adv: 1.0
+  w_temporal: 0.0
+
+epochs: 5
+batch_size: 8
+fp16: false          # CPU does not benefit from AMP
+gradient_checkpointing: false
+
+checkpoint_dir: checkpoints
+log_wandb: false

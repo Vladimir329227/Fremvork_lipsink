@@ -1,0 +1,10 @@
+name: momentum_sgd
+lr: 1.0e-3
+momentum: 0.9
+nesterov: true
+dampening: 0.0
+weight_decay: 1.0e-4
+gradient_clipping:
+  enabled: true
+  max_norm: 5.0
+  norm_type: 2

@@ -1,0 +1,102 @@
+# LipSync Framework — Base Configuration
+# All values can be overridden via CLI flags or LipSyncConfig constructor.
+
+# ---------------------------------------------------------------------------
+# Model architecture
+# ---------------------------------------------------------------------------
+model:
+  # Audio encoder (Conformer)
+  n_mels: 80
+  audio_d_model: 256
+  audio_heads: 4
+  audio_layers: 6
+  audio_embed_dim: 512
+
+  # Identity encoder (ResNet-18)
+  identity_embed_dim: 512
+  pretrained_identity: true
+
+  # Generator (U-Net)
+  gen_in_channels: 4         # 3 RGB + 1 mask channel
+  gen_base_ch: 64
+  gen_depth: 4               # encoder/decoder levels
+
+  # Discriminator (PatchGAN)
+  disc_in_channels: 3
+  disc_base_ch: 64
+
+  # SyncNet
+  sync_embed_dim: 256
+
+# ---------------------------------------------------------------------------
+# Optimizer
+# ---------------------------------------------------------------------------
+optimizer:
+  name: adamw                 # sgd | momentum_sgd | clipping_sgd | adamw | lion
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+  # d_lr: 1.0e-4             # separate discriminator LR (defaults to lr)
+  # lookahead: false
+  gradient_clipping:
+    enabled: true
+    max_norm: 1.0
+    norm_type: 2
+
+# ---------------------------------------------------------------------------
+# LR Scheduler
+# ---------------------------------------------------------------------------
+scheduler:
+  name: warmup_cosine
+  warmup_steps: 2000
+  T_max: 200000
+  eta_min: 1.0e-6
+
+# ---------------------------------------------------------------------------
+# Loss functions
+# ---------------------------------------------------------------------------
+losses:
+  huber_delta: 1.0
+  perceptual_layers: [relu3_3, relu4_3]
+  adv_mode: hinge             # hinge | lsgan | bce | wgan
+
+  # Loss weights
+  w_recon: 10.0
+  w_perceptual: 1.0
+  w_sync: 0.5
+  w_temporal: 0.1
+  w_adv: 1.0
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+epochs: 100
+batch_size: 8
+fp16: true
+gradient_checkpointing: false
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+data:
+  train_root: data/train
+  val_root: data/val
+  audio_window: 16            # mel frames per sample
+  face_size: 256
+  lip_size: 96
+  augment: true
+  num_workers: 4
+
+# ---------------------------------------------------------------------------
+# Super-resolution
+# ---------------------------------------------------------------------------
+use_super_resolution: false
+sr_backend: gfpgan            # gfpgan | codeformer | realesrgan
+
+# ---------------------------------------------------------------------------
+# Logging & checkpoints
+# ---------------------------------------------------------------------------
+checkpoint_dir: checkpoints
+log_wandb: false
+wandb_project: lipsync
+save_every_n_epochs: 5

@@ -1,0 +1,9 @@
+huber_delta: 1.0
+perceptual_layers: [relu3_3, relu4_3]
+adv_mode: hinge
+
+w_recon: 10.0
+w_perceptual: 1.0
+w_sync: 0.5
+w_temporal: 0.1
+w_adv: 1.0
