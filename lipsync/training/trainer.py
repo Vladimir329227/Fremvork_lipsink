@@ -19,6 +19,8 @@ from ..models import (
 )
 from ..optimizers import build_optimizer, build_scheduler
 from .callbacks import Callback, ModelCheckpoint, ProgressBar
+from .checkpoint import make_metadata, migrate_to_v2, validate_checkpoint_v2
+from ..runtime import assert_runtime_compatible, set_deterministic
 
 
 class LipSyncTrainerCore:
@@ -39,6 +41,17 @@ class LipSyncTrainerCore:
 
     def __init__(self, config: dict[str, Any], device: str = "auto") -> None:
         self.config = config
+        # Deterministic mode for reproducibility
+        if self.config.get("deterministic", False):
+            set_deterministic(self.config.get("seed", 42))
+
+        # Runtime compatibility checks (fail-fast with clear diagnostics)
+        assert_runtime_compatible(
+            require_torchvision=self.config.get("losses", {}).get("w_perceptual", 0) > 0,
+            require_torchaudio=False,
+            require_cv2=False,
+        )
+
         self.device = self._resolve_device(device)
         self.should_stop = False
         self._build_models()
@@ -361,22 +374,23 @@ class LipSyncTrainerCore:
         """Save full model state to *path*."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "audio_encoder": self.audio_encoder.state_dict(),
-                "identity_encoder": self.identity_encoder.state_dict(),
-                "generator": self.generator.state_dict(),
-                "discriminator": self.discriminator.state_dict(),
-                "opt_g": self.opt_g.state_dict(),
-                "opt_d": self.opt_d.state_dict(),
-                "config": self.config,
-            },
-            path,
-        )
+        payload = {
+            "audio_encoder": self.audio_encoder.state_dict(),
+            "identity_encoder": self.identity_encoder.state_dict(),
+            "generator": self.generator.state_dict(),
+            "discriminator": self.discriminator.state_dict(),
+            "opt_g": self.opt_g.state_dict(),
+            "opt_d": self.opt_d.state_dict(),
+            "config": self.config,
+            "meta": make_metadata(self.config),
+        }
+        torch.save(payload, path)
 
     def load_checkpoint(self, path: str | Path) -> None:
         """Load model state from *path*."""
         ckpt = torch.load(str(path), map_location=self.device)
+        ckpt = migrate_to_v2(ckpt)
+        validate_checkpoint_v2(ckpt)
         self.audio_encoder.load_state_dict(ckpt["audio_encoder"])
         self.identity_encoder.load_state_dict(ckpt["identity_encoder"])
         self.generator.load_state_dict(ckpt["generator"])

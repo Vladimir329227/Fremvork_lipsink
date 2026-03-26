@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 from torch.utils.data import Dataset
 
+from .config import validate_config
 from .nn import (
     BatchNorm1d,
     Conv2d,
@@ -33,6 +34,7 @@ from .nn import (
     MaxPool2d,
     Sequential,
 )
+from .training.checkpoint import migrate_to_v2, validate_checkpoint_v2
 from .training.callbacks import (
     Callback,
     EarlyStopping,
@@ -76,6 +78,10 @@ class LipSyncConfig:
     optimizer: dict[str, Any] = field(default_factory=lambda: {"name": "adamw", "lr": 2e-4})
     scheduler: dict[str, Any] = field(default_factory=dict)
     losses: dict[str, Any] = field(default_factory=dict)
+    audio: dict[str, Any] = field(default_factory=lambda: {"sample_rate": 16000, "n_mels": 80, "window": 16})
+    video: dict[str, Any] = field(default_factory=lambda: {"face_size": 256, "lip_size": 96, "target_fps": 25.0})
+    lipsync: dict[str, Any] = field(default_factory=lambda: {"sync_window": 5, "temporal_radius": 2, "mouth_region_weight": 1.0})
+    inference: dict[str, Any] = field(default_factory=lambda: {"smoothing": 0.0, "paste_mode": "direct", "keep_original_audio": True})
     epochs: int = 100
     batch_size: int = 8
     fp16: bool = True
@@ -184,6 +190,7 @@ class LipSyncTrainer:
         device: str = "auto",
     ) -> None:
         self.config = config or LipSyncConfig()
+        validate_config(self.config.to_dict())
         self._core = LipSyncTrainerCore(self.config.to_dict(), device=device)
         self.device = self._core.device
 
@@ -205,6 +212,7 @@ class LipSyncTrainer:
             Configured LipSyncTrainer.
         """
         cfg = LipSyncConfig.from_yaml(config_path)
+        validate_config(cfg.to_dict())
         for k, v in overrides.items():
             if hasattr(cfg, k):
                 setattr(cfg, k, v)
@@ -223,6 +231,8 @@ class LipSyncTrainer:
         import torch
 
         ckpt = torch.load(str(checkpoint_path), map_location="cpu")
+        ckpt = migrate_to_v2(ckpt)
+        validate_checkpoint_v2(ckpt)
         cfg_dict = ckpt.get("config", {})
         cfg = LipSyncConfig.from_dict(cfg_dict)
         trainer = cls(cfg, device=device)
@@ -401,4 +411,23 @@ __all__ = [
     "ModelCheckpoint",
     "LRSchedulerCallback",
     "WandbLogger",
+    # Unified apply API
+    "apply_batch",
+    "apply_batch_pairs",
+    "apply_realtime",
 ]
+
+
+def apply_batch(*args, **kwargs):
+    from .apply import apply_batch as _apply_batch
+    return _apply_batch(*args, **kwargs)
+
+
+def apply_batch_pairs(*args, **kwargs):
+    from .apply import apply_batch_pairs as _apply_batch_pairs
+    return _apply_batch_pairs(*args, **kwargs)
+
+
+def apply_realtime(*args, **kwargs):
+    from .apply import apply_realtime as _apply_realtime
+    return _apply_realtime(*args, **kwargs)

@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lipsync-framework"
+version = "0.2.0"
+description = "Audio-driven lip-sync neural network framework"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "LipSync Framework Contributors"}]
+keywords = ["lipsync", "pytorch", "realtime", "video", "audio"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "torch>=2.1.0",
+  "torchvision>=0.16.0",
+  "torchaudio>=2.1.0",
+  "numpy>=1.24.0",
+  "scipy>=1.11.0",
+  "PyYAML>=6.0.1",
+  "opencv-python>=4.8.0",
+]
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.104.0",
+  "uvicorn[standard]>=0.24.0",
+  "websockets>=12.0",
+]
+realtime = [
+  "onnx>=1.15.0",
+  "onnxruntime>=1.16.0",
+  "face-alignment>=1.4.1",
+]
+sr = [
+  "gfpgan>=1.3.8",
+  "basicsr>=1.4.2",
+  "realesrgan>=0.3.0",
+]
+all = [
+  "lipsync-framework[api,realtime,sr]",
+]
+
+[project.scripts]
+lipsync = "cli:main"
+
+[tool.setuptools]
+packages = ["lipsync", "lipsync.activations", "lipsync.api", "lipsync.config", "lipsync.data", "lipsync.data.augmentation", "lipsync.data.datasets", "lipsync.data.preprocessing", "lipsync.evaluation", "lipsync.inference", "lipsync.inference.batch", "lipsync.inference.realtime", "lipsync.losses", "lipsync.models", "lipsync.models.audio_encoder", "lipsync.models.discriminator", "lipsync.models.generator", "lipsync.models.identity_encoder", "lipsync.models.pose_estimator", "lipsync.models.super_resolution", "lipsync.nn", "lipsync.optimizers", "lipsync.plugins", "lipsync.runtime", "lipsync.training"]

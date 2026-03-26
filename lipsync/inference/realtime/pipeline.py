@@ -22,6 +22,7 @@ import torch.nn as nn
 
 from ...data.preprocessing.audio import AudioPreprocessor
 from ...data.preprocessing.video import VideoPreprocessor
+from ...runtime import assert_runtime_compatible
 
 
 class AudioRingBuffer:
@@ -92,6 +93,10 @@ class RealTimePipeline:
         self._checkpoint_path = Path(checkpoint_path)
         self._sr = None
         self._ref_identity: torch.Tensor | None = None
+        self._latencies: list[float] = []
+
+        # Fail-fast diagnostics for runtime dependencies
+        assert_runtime_compatible(require_cv2=True, require_torchvision=False)
 
         if use_sr:
             from ...models.super_resolution import SuperResolutionWrapper
@@ -162,9 +167,14 @@ class RealTimePipeline:
             (H, W, 3) uint8 BGR frame with lip motion applied.
         """
         self._load_models()
+        t0 = time.perf_counter()
 
         # Detect face and get landmarks
-        landmarks = self.video_proc.detect_landmarks(frame_bgr)
+        try:
+            landmarks = self.video_proc.detect_landmarks(frame_bgr)
+        except Exception:
+            # Graceful degradation: pass-through frame if detector fails
+            return frame_bgr
         if landmarks is None:
             return frame_bgr
 
@@ -199,7 +209,11 @@ class RealTimePipeline:
         out_bgr = cv2.cvtColor(out_np, cv2.COLOR_RGB2BGR)
 
         if self.use_sr and self._sr is not None:
-            out_bgr = self._sr.enhance(out_bgr)
+            try:
+                out_bgr = self._sr.enhance(out_bgr)
+            except Exception:
+                # Graceful degradation: continue without SR
+                pass
 
         # Paste back into original frame
         result = frame_bgr.copy()
@@ -214,7 +228,28 @@ class RealTimePipeline:
             out_resized = cv.resize(out_bgr, (w, h))
             result[y1:y2, x1:x2] = out_resized
 
+        self._latencies.append(time.perf_counter() - t0)
         return result
+
+
+    def get_runtime_metrics(self) -> dict[str, float]:
+        """Return p50/p95/p99 latency and realtime factor estimates."""
+        if not self._latencies:
+            return {"p50_ms": 0.0, "p95_ms": 0.0, "p99_ms": 0.0, "fps_est": 0.0, "rt_factor": 0.0}
+        arr = np.array(self._latencies, dtype=np.float64)
+        p50 = float(np.percentile(arr, 50) * 1000.0)
+        p95 = float(np.percentile(arr, 95) * 1000.0)
+        p99 = float(np.percentile(arr, 99) * 1000.0)
+        mean_s = float(arr.mean())
+        fps_est = (1.0 / mean_s) if mean_s > 0 else 0.0
+        rt_factor = fps_est / self.fps if self.fps > 0 else 0.0
+        return {
+            "p50_ms": round(p50, 3),
+            "p95_ms": round(p95, 3),
+            "p99_ms": round(p99, 3),
+            "fps_est": round(fps_est, 3),
+            "rt_factor": round(rt_factor, 3),
+        }
 
     def export_onnx(self, save_path: str | Path, input_size: int = 256) -> None:
         """Export the generator to ONNX for deployment.

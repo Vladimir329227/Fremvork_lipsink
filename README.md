@@ -24,6 +24,14 @@ and a high-level API for training in a few lines of code.
 | **Evaluation** | PSNR, SSIM, LMD, Lip-LMD, SyncScore |
 | **REST + WebSocket API** | FastAPI for easy integration into products |
 
+## Why This Is A Lip-Sync Framework
+
+- Purpose-built pipeline: audio-driven generation (`AudioEncoder` + `LipSyncGenerator`) instead of generic video editing.
+- Lip-sync training losses: `sync`, `temporal`, `identity`, `adversarial`, `perceptual`.
+- Domain dataset path: GRID preprocessing into `audio.pt + frames + lips + landmarks.pt`.
+- Two production application modes: offline batch generation and realtime streaming.
+- Built-in lip-sync metrics: `Lip-LMD`, `SyncScore`, `LMD`, `PSNR`, `SSIM`.
+
 ---
 
 ## Installation
@@ -159,6 +167,21 @@ python cli.py export --checkpoint checkpoints/best_model.pt --output model.onnx
 
 # Evaluate
 python cli.py eval --checkpoint checkpoints/best_model.pt --data-root data/ --split test
+
+# Download GRID from Kaggle
+python cli.py data-download --output-dir data/raw_grid
+
+# Prepare GRID into training format
+python cli.py data-prepare --input-root data/raw_grid --output-root data/processed
+
+# Apply trained model (single pair)
+python cli.py apply-batch --checkpoint checkpoints/best_model.pt --video face.mp4 --audio speech.wav --output result.mp4
+
+# Apply trained model (multiple pairs from JSON)
+python cli.py apply-batch --checkpoint checkpoints/best_model.pt --pairs-json pairs.json
+
+# Run realtime apply server (WebSocket/REST endpoints)
+python cli.py apply-realtime --checkpoint checkpoints/best_model.pt --host 0.0.0.0 --port 8000
 ```
 
 ---
@@ -265,8 +288,25 @@ Endpoints:
 
 ## GRID Corpus Preparation
 
-If you use GRID from Kaggle (`s*_processed/*.mpg` + `s*_processed/align/*.align`),
-use the ready script:
+Automatic download from Kaggle API:
+
+```bash
+python cli.py data-download \
+  --output-dir data/raw_grid \
+  --dataset jedidiahangekouakou/grid-corpus-dataset-for-training-lipnet
+```
+
+Prepare raw GRID (`s*_processed/*.mpg` + `s*_processed/align/*.align`) with CLI:
+
+```bash
+python cli.py data-prepare \
+  --input-root data/raw_grid \
+  --output-root data/processed \
+  --speakers s7_processed,s31_processed \
+  --device cpu
+```
+
+Alternative script entrypoint (same library implementation):
 
 ```bash
 python scripts/prepare_grid_dataset.py   --input-root data   --output-root data/processed   --speakers s7_processed,s31_processed   --device cpu
@@ -282,6 +322,48 @@ Then train:
 
 ```bash
 python cli.py train --data-root data/processed --config configs/base.yaml
+```
+
+## Lip-Sync Runtime Parameters
+
+You can tune lip-sync-specific parameters in config or through CLI:
+
+- `audio.sample_rate`, `audio.n_mels`, `audio.window`
+- `video.face_size`, `video.lip_size`, `video.target_fps`
+- `lipsync.sync_window`, `lipsync.temporal_radius`, `lipsync.mouth_region_weight`
+- `inference.smoothing`, `inference.paste_mode`, `inference.keep_original_audio`
+
+Example:
+
+```bash
+python cli.py train \
+  --data-root data/processed \
+  --config configs/base.yaml \
+  --audio-window 20 \
+  --video-target-fps 25 \
+  --sync-window 7 \
+  --mouth-region-weight 1.2
+```
+
+## Apply Trained Models
+
+Batch mode:
+
+```bash
+python cli.py apply-batch \
+  --checkpoint checkpoints/best_model.pt \
+  --video result/1.mp4 \
+  --audio result/1.wav \
+  --output result/out.mp4
+```
+
+Realtime mode:
+
+```bash
+python cli.py apply-realtime \
+  --checkpoint checkpoints/best_model.pt \
+  --fps 25 \
+  --audio-window-ms 200
 ```
 
 ## Dataset Format
@@ -303,3 +385,75 @@ data/
 ```
 
 `metadata.json` is a list of dicts with keys: `id`, `n_frames`, `fps`, `speaker`.
+
+
+## Runtime Profiles
+
+Use runtime profiles to quickly target deployment constraints:
+
+- `cpu-safe` — deterministic CPU mode, low memory, safe defaults
+- `gpu-fast` — maximum throughput/latency
+- `gpu-quality` — higher quality settings with checkpointing
+
+Example:
+
+```bash
+python cli.py train --config configs/base.yaml --data-root data/processed --profile cpu-safe
+```
+
+## Framework Operations
+
+```bash
+# Dependency/environment diagnostics
+python cli.py doctor
+
+# Synthetic performance benchmark
+python cli.py benchmark --device auto --steps 100 --batch-size 4
+
+# Dataset integrity validation
+python cli.py data-validate --data-root data/processed --split train --output reports/train_validation.json
+
+# Realtime latency profiling from generated *_meta.json files
+python cli.py profile-realtime --meta-dir result/1 --output reports/realtime.json
+```
+
+## Checkpoint Schema v2
+
+Checkpoints are now stored with schema metadata:
+
+- `meta.schema_version`
+- `meta.created_at`
+- `meta.git_hash`
+- `meta.config_hash`
+- `meta.training_signature`
+
+Older checkpoints are migrated on load (`v1 -> v2`) automatically.
+
+## Plugin API
+
+You can extend the framework with plugins discovered via Python entry points:
+
+- `lipsync.plugins.model`
+- `lipsync.plugins.loss`
+- `lipsync.plugins.optimizer`
+- `lipsync.plugins.preprocessor`
+
+See `lipsync/plugins/` for interfaces and registry.
+
+## Reproducibility
+
+Enable deterministic training in config:
+
+```yaml
+deterministic: true
+seed: 42
+```
+
+This seeds Python/NumPy/PyTorch and enables deterministic torch backends.
+
+## Troubleshooting
+
+- `torchvision` import errors: set `losses.w_perceptual: 0.0` or install matching torch/torchvision versions.
+- `cv2` missing: `pip install opencv-python`.
+- `onnxruntime` missing for deployment: `pip install onnxruntime`.
+- Low realtime-factor on CPU: use `--profile cpu-safe`, smaller `gen_base_ch`, and ONNX/TorchScript export.

@@ -29,6 +29,29 @@ model:
   sync_embed_dim: 256
 
 # ---------------------------------------------------------------------------
+# Lip-sync specific processing parameters
+# ---------------------------------------------------------------------------
+audio:
+  sample_rate: 16000
+  n_mels: 80
+  window: 16
+
+video:
+  face_size: 256
+  lip_size: 96
+  target_fps: 25.0
+
+lipsync:
+  sync_window: 5
+  temporal_radius: 2
+  mouth_region_weight: 1.0
+
+inference:
+  smoothing: 0.0
+  paste_mode: direct            # direct | seamless
+  keep_original_audio: true
+
+# ---------------------------------------------------------------------------
 # Optimizer
 # ---------------------------------------------------------------------------
 optimizer:
@@ -100,3 +123,13 @@ checkpoint_dir: checkpoints
 log_wandb: false
 wandb_project: lipsync
 save_every_n_epochs: 5
+
+# Reproducibility
+deterministic: false
+seed: 42
+
+# Runtime profile (cpu-safe | gpu-fast | gpu-quality)
+runtime:
+  profile: gpu-fast
+  prefer_onnx: false
+  use_torchscript: false

@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 
+from ..runtime import assert_runtime_compatible
+
 try:
     from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +30,8 @@ def create_app(
     device: str = "auto",
     use_sr: bool = False,
     sr_backend: str = "gfpgan",
+    fps: float = 25.0,
+    audio_window_ms: float = 200.0,
 ) -> Any:
     """Build and return the FastAPI application.
 
@@ -50,6 +54,8 @@ def create_app(
         device=device,
         use_sr=use_sr,
         sr_backend=sr_backend,
+        fps=fps,
+        audio_window_ms=audio_window_ms,
     )
     _batch_processor = BatchProcessor(
         checkpoint_path=checkpoint_path,
@@ -58,11 +64,21 @@ def create_app(
         sr_backend=sr_backend,
     )
 
+    assert_runtime_compatible(require_cv2=True, require_torchvision=False)
+
     app = FastAPI(
         title="LipSync Framework API",
         description="Real-time and batch audio-driven lip synchronisation.",
         version="1.0.0",
     )
+
+    REQUEST_LIMITS = {
+        "max_video_bytes": 300 * 1024 * 1024,
+        "max_audio_bytes": 20 * 1024 * 1024,
+        "max_frame_bytes": 5 * 1024 * 1024,
+        "max_ws_queue": 8,
+    }
+    ws_semaphore = asyncio.Semaphore(REQUEST_LIMITS["max_ws_queue"])
 
     app.add_middleware(
         CORSMiddleware,
@@ -97,8 +113,15 @@ def create_app(
             audio_path = tmp / audio.filename
             output_path = tmp / "output.mp4"
 
-            video_path.write_bytes(await video.read())
-            audio_path.write_bytes(await audio.read())
+            video_bytes = await video.read()
+            audio_bytes = await audio.read()
+            if len(video_bytes) > REQUEST_LIMITS["max_video_bytes"]:
+                raise HTTPException(status_code=413, detail="Video too large")
+            if len(audio_bytes) > REQUEST_LIMITS["max_audio_bytes"]:
+                raise HTTPException(status_code=413, detail="Audio too large")
+
+            video_path.write_bytes(video_bytes)
+            audio_path.write_bytes(audio_bytes)
 
             _batch_processor.process(
                 video_path=video_path,
@@ -134,6 +157,8 @@ def create_app(
         import cv2
 
         frame_bytes = base64.b64decode(frame_b64)
+        if len(frame_bytes) > REQUEST_LIMITS["max_frame_bytes"]:
+            raise HTTPException(status_code=413, detail="Frame too large")
         frame_np = np.frombuffer(frame_bytes, dtype=np.uint8)
         frame = cv2.imdecode(frame_np, cv2.IMREAD_COLOR)
 
@@ -165,7 +190,8 @@ def create_app(
         await websocket.accept()
         try:
             while True:
-                msg = await websocket.receive_json()
+                async with ws_semaphore:
+                    msg = await websocket.receive_json()
                 mtype = msg.get("type")
                 data = msg.get("data", "")
 
@@ -202,10 +228,20 @@ def run_server(
     port: int = 8000,
     device: str = "auto",
     use_sr: bool = False,
+    sr_backend: str = "gfpgan",
+    fps: float = 25.0,
+    audio_window_ms: float = 200.0,
     **kwargs,
 ) -> None:
     """Start the uvicorn server."""
     import uvicorn
 
-    app = create_app(checkpoint_path=checkpoint_path, device=device, use_sr=use_sr)
+    app = create_app(
+        checkpoint_path=checkpoint_path,
+        device=device,
+        use_sr=use_sr,
+        sr_backend=sr_backend,
+        fps=fps,
+        audio_window_ms=audio_window_ms,
+    )
     uvicorn.run(app, host=host, port=port, **kwargs)

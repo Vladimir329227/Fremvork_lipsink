@@ -1,11 +1,14 @@
 # ── Датасеты ──────────────────────────────────────────────────────────────────
 data/
-scripts/prepare_grid_dataset.py
 
 # ── Результаты и сгенерированные видео ────────────────────────────────────────
 result/1/
+result/example_demo/
 result/*.mp4
 result/*.wav
+result/*_meta.json
+result/**/summary.json
+result/**/training_log.json
 
 # ── Чекпоинты и веса моделей ──────────────────────────────────────────────────
 checkpoints/
@@ -19,12 +22,17 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
 
 # ── Виртуальные окружения ─────────────────────────────────────────────────────
 .venv/
 venv/
 env/
 .env
+.env.*
 
 # ── Временные и системные файлы ───────────────────────────────────────────────
 *.log
@@ -48,3 +56,12 @@ wandb/
 runs/
 logs/
 lightning_logs/
+
+# ── Артефакты сборки/покрытия ─────────────────────────────────────────────────
+build/
+dist/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

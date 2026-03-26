@@ -87,21 +87,16 @@ RESULTS = {}
 for opt_name in ["momentum_sgd", "clipping_sgd", "adamw"]:
     print(f"\n--- Optimiser: {opt_name} ---")
     model = build_cnn()
-    model.compile(
-        optimizer=opt_name,
-        loss="cross_entropy",
-        lr=1e-3 if opt_name == "adamw" else 5e-3,
-        momentum=0.9 if "sgd" in opt_name else None if False else None,
-    )
-    # momentum_sgd / clipping_sgd accept momentum kwarg directly
-    if "sgd" in opt_name:
-        model.compile(
-            optimizer=opt_name,
-            loss="cross_entropy",
-            lr=5e-3,
-            momentum=0.9,
-            max_norm=1.0 if opt_name == "clipping_sgd" else 0,
-        )
+    compile_kwargs = {
+        "optimizer": opt_name,
+        "loss": "cross_entropy",
+        "lr": 1e-3 if opt_name == "adamw" else 5e-3,
+    }
+    if opt_name in {"momentum_sgd", "clipping_sgd"}:
+        compile_kwargs["momentum"] = 0.9
+    if opt_name == "clipping_sgd":
+        compile_kwargs["max_norm"] = 1.0
+    model.compile(**compile_kwargs)
 
     model.fit(
         train_ds.X, train_ds.y,
