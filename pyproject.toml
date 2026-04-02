@@ -48,5 +48,11 @@ all = [
 [project.scripts]
 lipsync = "cli:main"
 
-[tool.setuptools]
-packages = ["lipsync", "lipsync.activations", "lipsync.api", "lipsync.config", "lipsync.data", "lipsync.data.augmentation", "lipsync.data.datasets", "lipsync.data.preprocessing", "lipsync.evaluation", "lipsync.inference", "lipsync.inference.batch", "lipsync.inference.realtime", "lipsync.losses", "lipsync.models", "lipsync.models.audio_encoder", "lipsync.models.discriminator", "lipsync.models.generator", "lipsync.models.identity_encoder", "lipsync.models.pose_estimator", "lipsync.models.super_resolution", "lipsync.nn", "lipsync.optimizers", "lipsync.plugins", "lipsync.runtime", "lipsync.training"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lipsync*"]
+
+[tool.pytest.ini_options]
+markers = [
+  "slow: optional tests that train a small model (run with pytest -m slow)",
+]

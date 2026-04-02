@@ -22,6 +22,11 @@ def main() -> None:
     parser.add_argument("--min-frames", type=int, default=20)
     parser.add_argument("--limit", type=int, default=0, help="Process only first N clips (0 = all)")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--split-by-speaker",
+        action="store_true",
+        help="Keep each speaker in a single split (train or val)",
+    )
     args = parser.parse_args()
 
     speakers = [s.strip() for s in args.speakers.split(",") if s.strip()] if args.speakers else None
@@ -38,6 +43,7 @@ def main() -> None:
         min_frames=args.min_frames,
         limit=args.limit,
         overwrite=args.overwrite,
+        split_by_speaker=args.split_by_speaker,
     )
     print("Done.")
     print(summary)

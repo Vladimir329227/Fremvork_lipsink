@@ -22,7 +22,7 @@ from typing import Any
 import yaml
 from torch.utils.data import Dataset
 
-from .config import validate_config
+from .config import DEFAULT_INFERENCE, merge_inference_defaults, validate_config
 from .nn import (
     BatchNorm1d,
     Conv2d,
@@ -81,7 +81,8 @@ class LipSyncConfig:
     audio: dict[str, Any] = field(default_factory=lambda: {"sample_rate": 16000, "n_mels": 80, "window": 16})
     video: dict[str, Any] = field(default_factory=lambda: {"face_size": 256, "lip_size": 96, "target_fps": 25.0})
     lipsync: dict[str, Any] = field(default_factory=lambda: {"sync_window": 5, "temporal_radius": 2, "mouth_region_weight": 1.0})
-    inference: dict[str, Any] = field(default_factory=lambda: {"smoothing": 0.0, "paste_mode": "direct", "keep_original_audio": True})
+    inference: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_INFERENCE))
+    data: dict[str, Any] = field(default_factory=dict)
     epochs: int = 100
     batch_size: int = 8
     fp16: bool = True
@@ -121,12 +122,20 @@ class InferenceResult:
         self.frames = frames_bgr
         self.fps = fps
 
-    def save(self, path: str | Path, fps: float | None = None) -> Path:
+    def save(
+        self,
+        path: str | Path,
+        fps: float | None = None,
+        audio_wav: str | Path | None = None,
+        mux_audio: bool = True,
+    ) -> Path:
         """Write frames to an MP4 file.
 
         Args:
             path: Output file path.
             fps: Override frame rate.
+            audio_wav: If set and *mux_audio*, mux this WAV into the output via ffmpeg.
+            mux_audio: When False, skip mux even if *audio_wav* is provided.
 
         Returns:
             Path to the written file.
@@ -147,6 +156,10 @@ class InferenceResult:
         for f in self.frames:
             writer.write(f)
         writer.release()
+        if mux_audio and audio_wav is not None and Path(audio_wav).exists():
+            from .inference.mux import mux_video_audio
+
+            mux_video_audio(path, Path(audio_wav), path)
         return path
 
     def __len__(self) -> int:
@@ -234,6 +247,8 @@ class LipSyncTrainer:
         ckpt = migrate_to_v2(ckpt)
         validate_checkpoint_v2(ckpt)
         cfg_dict = ckpt.get("config", {})
+        cfg_dict = copy.deepcopy(cfg_dict)
+        cfg_dict["inference"] = merge_inference_defaults(cfg_dict.get("inference"))
         cfg = LipSyncConfig.from_dict(cfg_dict)
         trainer = cls(cfg, device=device)
         trainer._core.load_checkpoint(checkpoint_path)
@@ -282,13 +297,14 @@ class LipSyncTrainer:
         if callbacks:
             cbs.extend(callbacks)
 
+        nw = self.config.data.get("num_workers", num_workers) if self.config.data else num_workers
         self._core.fit(
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             epochs=epochs or self.config.epochs,
             batch_size=batch_size or self.config.batch_size,
             callbacks=cbs,
-            num_workers=num_workers,
+            num_workers=int(nw),
         )
         return self
 
@@ -302,6 +318,7 @@ class LipSyncTrainer:
         video: str | Path,
         output_path: str | Path | None = None,
         use_sr: bool | None = None,
+        inference_overrides: dict[str, Any] | None = None,
     ) -> InferenceResult:
         """Run lip-sync inference on a video with the given audio.
 
@@ -310,40 +327,58 @@ class LipSyncTrainer:
             video: Path to source video.
             output_path: If given, also saves result to this path.
             use_sr: Override config super-resolution setting.
+            inference_overrides: Optional keys merged over checkpoint ``inference``
+                (e.g. ``{"mouth_composite_mode": "blend"}`` to avoid raw paste noise).
 
         Returns:
             InferenceResult with processed frames.
         """
         from .inference.batch.processor import BatchProcessor
-        import tempfile
 
         sr = use_sr if use_sr is not None else self.config.use_super_resolution
 
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_out = Path(tmp) / "result.mp4"
-            proc = BatchProcessor(
-                checkpoint_path=Path(self.config.checkpoint_dir) / "best_model.pt",
-                device=str(self.device),
-                use_sr=sr,
-                sr_backend=self.config.sr_backend,
-            )
-            # Share already-loaded model weights
-            proc._models = {
-                "audio_encoder": self._core.audio_encoder,
-                "identity_encoder": self._core.identity_encoder,
-                "generator": self._core.generator,
-            }
-            proc._models_loaded = True
+        ckpt_arg = getattr(self._core, "_loaded_checkpoint_path", None) or (
+            Path(self.config.checkpoint_dir) / "best_model.pt"
+        )
+        # Prefer merged trainer ``inference`` over raw checkpoint file (avoids stale / partial infer).
+        tr_inf = merge_inference_defaults(self.config.to_dict().get("inference"))
+        if inference_overrides:
+            tr_inf = {**tr_inf, **inference_overrides}
+        proc = BatchProcessor(
+            checkpoint_path=ckpt_arg,
+            device=str(self.device),
+            use_sr=sr,
+            sr_backend=self.config.sr_backend,
+            inference_overrides=tr_inf,
+        )
+        proc._models = {
+            "audio_encoder": self._core.audio_encoder,
+            "identity_encoder": self._core.identity_encoder,
+            "generator": self._core.generator,
+        }
 
+        fps = float(self.config.video.get("target_fps", 25.0))
+        out_path = Path(output_path) if output_path else None
+        if out_path is None:
+            import tempfile
+
+            tmp_dir = tempfile.mkdtemp()
+            out_path = Path(tmp_dir) / "result.mp4"
+        else:
+            tmp_dir = None
+
+        try:
             proc.process(
                 video_path=video,
                 audio_path=audio,
-                output_path=tmp_out,
+                output_path=out_path,
+                fps=fps,
             )
 
             import cv2
-            cap = cv2.VideoCapture(str(tmp_out))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+
+            cap = cv2.VideoCapture(str(out_path))
+            fps = cap.get(cv2.CAP_PROP_FPS) or fps
             frames = []
             while True:
                 ret, frame = cap.read()
@@ -351,10 +386,13 @@ class LipSyncTrainer:
                     break
                 frames.append(frame)
             cap.release()
+        finally:
+            if tmp_dir:
+                import shutil
+
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
         result = InferenceResult(frames, fps=fps)
-        if output_path:
-            result.save(output_path)
         return result
 
     # ------------------------------------------------------------------

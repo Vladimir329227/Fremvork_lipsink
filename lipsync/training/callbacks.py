@@ -108,7 +108,7 @@ class ModelCheckpoint(Callback):
                 self._best = current
             path = self.save_dir / self.filename.format(epoch=epoch, monitor=current)
             trainer.save_checkpoint(path)
-            print(f"[Checkpoint] Saved → {path}")
+            print(f"[Checkpoint] Saved -> {path}")
 
 
 class LRSchedulerCallback(Callback):
@@ -164,6 +164,7 @@ class ProgressBar(Callback):
     def on_epoch_begin(self, trainer: "Trainer", epoch: int) -> None:
         self._epoch_start = time.time()
         self._epoch = epoch
+        print(f"[Epoch {epoch}] training...", flush=True)
 
     def on_epoch_end(self, trainer: "Trainer", epoch: int, logs: dict) -> None:
         elapsed = time.time() - self._epoch_start

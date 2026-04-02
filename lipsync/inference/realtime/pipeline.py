@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from ...composite import _DEFAULT_LIP_BOX, composite_mouth_region, mouth_composite_kwargs_from_inference, pool_audio_sequence
 from ...data.preprocessing.audio import AudioPreprocessor
 from ...data.preprocessing.video import VideoPreprocessor
 from ...runtime import assert_runtime_compatible
@@ -94,6 +95,13 @@ class RealTimePipeline:
         self._sr = None
         self._ref_identity: torch.Tensor | None = None
         self._latencies: list[float] = []
+        self._mouth_frac: float = 0.42
+        self._audio_pool: str = "last"
+        self._mouth_alpha_floor: float | None = 0.45
+        self._mouth_composite_mode: str = "blend"
+        self._mouth_composite_scope: str = "lip_box"
+        self._lip_box_fracs: tuple[float, float, float, float] = _DEFAULT_LIP_BOX
+        self._lip_roi_feather_px: int = 0
 
         # Fail-fast diagnostics for runtime dependencies
         assert_runtime_compatible(require_cv2=True, require_torchvision=False)
@@ -114,11 +122,26 @@ class RealTimePipeline:
 
         from ...models import AudioEncoder, IdentityEncoder, LipSyncGenerator
 
-        ckpt = torch.load(str(self._checkpoint_path), map_location=self.device)
+        try:
+            ckpt = torch.load(str(self._checkpoint_path), map_location=self.device, weights_only=False)
+        except TypeError:
+            ckpt = torch.load(str(self._checkpoint_path), map_location=self.device)
         cfg = ckpt.get("config", {}).get("model", {})
+        inf = ckpt.get("config", {}).get("inference", {})
+        self._mouth_frac = float(inf.get("mouth_blend_from", 0.42))
+        self._audio_pool = inf.get("audio_embed_pool", "last")
+        kw = mouth_composite_kwargs_from_inference(inf)
+        self._mouth_composite_mode = kw["composite_mode"]
+        self._mouth_composite_scope = kw["composite_scope"]
+        self._lip_box_fracs = kw["lip_box_fracs"]
+        self._lip_roi_feather_px = kw["lip_roi_feather_px"]
+        self._mouth_alpha_floor = kw["alpha_floor"]
 
         audio_enc = AudioEncoder(
             n_mels=cfg.get("n_mels", 80),
+            d_model=cfg.get("audio_d_model", 256),
+            num_heads=cfg.get("audio_heads", 4),
+            num_layers=cfg.get("audio_layers", 6),
             embed_dim=cfg.get("audio_embed_dim", 512),
         ).to(self.device)
         audio_enc.load_state_dict(ckpt["audio_encoder"])
@@ -126,11 +149,15 @@ class RealTimePipeline:
 
         id_enc = IdentityEncoder(
             embed_dim=cfg.get("identity_embed_dim", 512),
+            pretrained=cfg.get("pretrained_identity", True),
         ).to(self.device)
         id_enc.load_state_dict(ckpt["identity_encoder"])
         id_enc.eval()
 
         gen = LipSyncGenerator(
+            in_channels=cfg.get("gen_in_channels", 4),
+            base_ch=cfg.get("gen_base_ch", 64),
+            num_encoder_blocks=cfg.get("gen_depth", 4),
             audio_dim=cfg.get("audio_embed_dim", 512),
             identity_dim=cfg.get("identity_embed_dim", 512),
         ).to(self.device)
@@ -146,9 +173,9 @@ class RealTimePipeline:
     def set_reference_frame(self, frame_bgr: np.ndarray) -> None:
         """Pre-compute identity embedding from a reference face frame."""
         self._load_models()
-        face_tensor = VideoPreprocessor.frame_to_tensor(
-            cv2_resize(frame_bgr, 256)
-        ).unsqueeze(0).to(self.device)
+        face_tensor = self.video_proc.bgr_patch_to_tensor(cv2_resize(frame_bgr, 256)).unsqueeze(0).to(
+            self.device
+        )
         with torch.no_grad():
             self._ref_identity = self._models["identity_encoder"](face_tensor)
 
@@ -178,8 +205,8 @@ class RealTimePipeline:
         if landmarks is None:
             return frame_bgr
 
-        face_crop = VideoPreprocessor.crop_face(frame_bgr, landmarks, 256)
-        face_tensor = VideoPreprocessor.frame_to_tensor(face_crop).unsqueeze(0).to(self.device)
+        face_crop = VideoPreprocessor.crop_face_square_from_landmarks(frame_bgr, landmarks, 256)
+        face_tensor = self.video_proc.bgr_patch_to_tensor(face_crop).unsqueeze(0).to(self.device)
 
         # Get audio mel window
         n_samples = self.audio_window_frames * self.audio_proc.hop_length
@@ -196,12 +223,23 @@ class RealTimePipeline:
             self._ref_identity = self._models["identity_encoder"](face_tensor)
 
         # Generate
-        audio_emb = self._models["audio_encoder"](mel)[:, -1]
+        audio_seq = self._models["audio_encoder"](mel)
+        audio_emb = pool_audio_sequence(audio_seq, self._audio_pool)
         masked_face = face_tensor.clone()
         masked_face[:, :, face_tensor.shape[-2] // 2 :, :] = 0.0
         masked_face_4ch = torch.cat([masked_face, torch.zeros_like(masked_face[:, :1])], dim=1)
         rgb, alpha = self._models["generator"](masked_face_4ch, audio_emb, self._ref_identity)
-        generated = (alpha * rgb + (1 - alpha) * face_tensor).squeeze(0)
+        generated = composite_mouth_region(
+            face_tensor,
+            rgb,
+            alpha,
+            self._mouth_frac,
+            alpha_floor=self._mouth_alpha_floor,
+            composite_mode=self._mouth_composite_mode,
+            composite_scope=self._mouth_composite_scope,
+            lip_box_fracs=self._lip_box_fracs,
+            lip_roi_feather_px=self._lip_roi_feather_px,
+        ).squeeze(0)
 
         # Back to numpy BGR
         out_np = ((generated.permute(1, 2, 0).cpu().numpy() + 1.0) * 127.5).clip(0, 255).astype(np.uint8)

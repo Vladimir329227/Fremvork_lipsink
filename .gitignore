@@ -1,3 +1,11 @@
+# ── Wav2Lip local training / inference outputs (clone code lives under external/Wav2Lip/) ──
+external/wav2lip_user_workspace/
+
+# ── Локальные проверки / смоук-данные ─────────────────────────────────────────
+verify_recon_*/
+_smoke_grid/
+_smoke_proc/
+
 # ── Датасеты ──────────────────────────────────────────────────────────────────
 data/
 

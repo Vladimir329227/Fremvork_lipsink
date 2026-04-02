@@ -4,6 +4,32 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+# Keep in sync with ``configs/base.yaml`` ``inference:`` and ``LipSyncConfig.inference``.
+DEFAULT_INFERENCE: dict[str, Any] = {
+    "smoothing": 0.0,
+    "paste_mode": "direct",
+    "keep_original_audio": True,
+    "mux_driving_audio": True,
+    "mouth_blend_from": 0.42,
+    # last: current-frame-aligned embedding (closer to mel→lip timing); mean dilutes motion.
+    "audio_embed_pool": "last",
+    "mouth_composite_mode": "blend",
+    "mouth_composite_scope": "lip_box",
+    "lip_roi_y0": 0.52,
+    "lip_roi_y1": 0.86,
+    "lip_roi_x0": 0.22,
+    "lip_roi_x1": 0.78,
+    "lip_roi_feather_px": 6,
+    "mouth_alpha_min": 0.45,
+}
+
+
+def merge_inference_defaults(inference: dict[str, Any] | None) -> dict[str, Any]:
+    """Overlay *inference* on defaults so checkpoints list full infer config (train == infer)."""
+    out = dict(DEFAULT_INFERENCE)
+    out.update(inference or {})
+    return out
+
 
 @dataclass
 class ValidationErrorItem:
@@ -61,6 +87,10 @@ def validate_config(config: dict[str, Any]) -> None:
         for k, v in losses.items():
             if k.startswith("w_") and (not _is_number(v) or v < 0):
                 err(f"losses.{k}", "must be non-negative number")
+        if "lip_recon_boost" in losses:
+            v = losses["lip_recon_boost"]
+            if not _is_number(v) or float(v) < 1.0:
+                err("losses.lip_recon_boost", "must be a number >= 1 (mouth ROI Huber weight multiplier)")
 
     runtime = config.get("runtime", {})
     if runtime and not isinstance(runtime, dict):
@@ -96,6 +126,15 @@ def validate_config(config: dict[str, Any]) -> None:
         ):
             err("lipsync.mouth_region_weight", "must be non-negative number")
 
+    data = config.get("data", {})
+    if data and not isinstance(data, dict):
+        err("data", "must be dict")
+    elif isinstance(data, dict):
+        if "static_face_prob" in data:
+            v = data["static_face_prob"]
+            if not _is_number(v) or float(v) < 0.0 or float(v) > 1.0:
+                err("data.static_face_prob", "must be a number in [0, 1]")
+
     inference = config.get("inference", {})
     if inference and not isinstance(inference, dict):
         err("inference", "must be dict")
@@ -106,6 +145,46 @@ def validate_config(config: dict[str, Any]) -> None:
             err("inference.paste_mode", "must be one of: direct, seamless")
         if "keep_original_audio" in inference and not isinstance(inference["keep_original_audio"], bool):
             err("inference.keep_original_audio", "must be bool")
+        if "mux_driving_audio" in inference and not isinstance(inference["mux_driving_audio"], bool):
+            err("inference.mux_driving_audio", "must be bool")
+        if "mouth_blend_from" in inference:
+            v = inference["mouth_blend_from"]
+            if not _is_number(v) or not (0.0 < float(v) < 1.0):
+                err("inference.mouth_blend_from", "must be in (0, 1)")
+        if "audio_embed_pool" in inference and inference["audio_embed_pool"] not in {"mean", "last"}:
+            err("inference.audio_embed_pool", "must be 'mean' or 'last'")
+        if "mouth_composite_mode" in inference and inference["mouth_composite_mode"] not in {
+            "blend",
+            "paste",
+            "hard_lower",
+        }:
+            err(
+                "inference.mouth_composite_mode",
+                "must be 'blend', 'paste', or 'hard_lower' (alias for paste)",
+            )
+        if "mouth_composite_scope" in inference and inference["mouth_composite_scope"] not in {
+            "lower_half",
+            "lip_box",
+        }:
+            err("inference.mouth_composite_scope", "must be 'lower_half' or 'lip_box'")
+        for key in ("lip_roi_y0", "lip_roi_y1", "lip_roi_x0", "lip_roi_x1"):
+            if key in inference:
+                v = inference[key]
+                if not _is_number(v) or float(v) < 0.0 or float(v) > 1.0:
+                    err(f"inference.{key}", "must be a number in [0, 1]")
+        if all(k in inference for k in ("lip_roi_y0", "lip_roi_y1", "lip_roi_x0", "lip_roi_x1")):
+            y0, y1 = float(inference["lip_roi_y0"]), float(inference["lip_roi_y1"])
+            x0, x1 = float(inference["lip_roi_x0"]), float(inference["lip_roi_x1"])
+            if y0 >= y1 or x0 >= x1:
+                err("inference.lip_roi_*", "require y0 < y1 and x0 < x1")
+        if "mouth_alpha_min" in inference and inference["mouth_alpha_min"] is not None:
+            v = inference["mouth_alpha_min"]
+            if not _is_number(v) or float(v) < 0 or float(v) > 1.0:
+                err("inference.mouth_alpha_min", "must be a number in [0, 1] or omit")
+        if "lip_roi_feather_px" in inference:
+            v = inference["lip_roi_feather_px"]
+            if not isinstance(v, int) or v < 0:
+                err("inference.lip_roi_feather_px", "must be non-negative int")
 
     if errors:
         text = "\n".join(f"- {e.key}: {e.message}" for e in errors)

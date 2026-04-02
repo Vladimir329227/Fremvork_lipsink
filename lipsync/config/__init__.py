@@ -1,3 +1,8 @@
-from .schema import ConfigValidationError, validate_config
+from .schema import DEFAULT_INFERENCE, ConfigValidationError, merge_inference_defaults, validate_config
 
-__all__ = ["validate_config", "ConfigValidationError"]
+__all__ = [
+    "DEFAULT_INFERENCE",
+    "merge_inference_defaults",
+    "validate_config",
+    "ConfigValidationError",
+]

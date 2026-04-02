@@ -6,10 +6,11 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, Dataset
 
-from ..losses import AdversarialLoss, HuberLoss, PerceptualLoss, SyncLoss, TemporalConsistencyLoss
+from ..losses import AdversarialLoss, HuberLoss, PerceptualLoss, SyncLoss
 from ..models import (
     AudioEncoder,
     IdentityEncoder,
@@ -20,6 +21,13 @@ from ..models import (
 from ..optimizers import build_optimizer, build_scheduler
 from .callbacks import Callback, ModelCheckpoint, ProgressBar
 from .checkpoint import make_metadata, migrate_to_v2, validate_checkpoint_v2
+from ..composite import (
+    composite_mouth_region,
+    lip_roi_slices,
+    mouth_composite_kwargs_from_inference,
+    pool_audio_sequence,
+)
+from ..config.schema import merge_inference_defaults
 from ..runtime import assert_runtime_compatible, set_deterministic
 
 
@@ -54,6 +62,7 @@ class LipSyncTrainerCore:
 
         self.device = self._resolve_device(device)
         self.should_stop = False
+        self._loaded_checkpoint_path: Path | None = None
         self._build_models()
         self._build_losses()
         self._build_optimizers()
@@ -112,7 +121,8 @@ class LipSyncTrainerCore:
 
     def _build_losses(self) -> None:
         lc = self.config.get("losses", {})
-        self.recon_loss = HuberLoss(delta=lc.get("huber_delta", 1.0))
+        self._huber_delta = float(lc.get("huber_delta", 1.0))
+        self.recon_loss = HuberLoss(delta=self._huber_delta)
 
         w_perc = lc.get("w_perceptual", 1.0)
         if w_perc > 0:
@@ -128,7 +138,6 @@ class LipSyncTrainerCore:
             self.perceptual_loss = None
 
         self.sync_loss = SyncLoss()
-        self.temporal_loss = TemporalConsistencyLoss()
         self.adv_loss = AdversarialLoss(mode=lc.get("adv_mode", "hinge"))
 
         self.loss_weights = {
@@ -138,6 +147,51 @@ class LipSyncTrainerCore:
             "temporal": lc.get("w_temporal", 0.1),
             "adv": lc.get("w_adv", 1.0),
         }
+
+    def _weighted_recon_and_lip_huber(
+        self,
+        generated: torch.Tensor,
+        gt: torch.Tensor,
+        mc_kw: dict[str, Any],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Huber recon with higher weight inside lip ROI (matches Wav2Lip-style pixel supervision).
+
+        Mean Huber over the full frame masks mouth errors: most pixels match outside the small
+        pasted box, so the network can keep high-frequency garbage inside the mouth ROI.
+        """
+        lc = self.config.get("losses", {})
+        boost = float(lc.get("lip_recon_boost", 1.0))
+        base = F.huber_loss(
+            generated, gt, delta=self._huber_delta, reduction="none"
+        )
+        _, _, H, W = generated.shape
+        if mc_kw.get("composite_scope") == "lip_box" and boost > 1.0:
+            y0, y1, x0, x1 = mc_kw["lip_box_fracs"]
+            sy, sx = lip_roi_slices(H, W, (y0, y1, x0, x1))
+            w = torch.ones_like(base)
+            w[:, :, sy, sx] = boost
+            l_recon = (base * w).sum() / w.sum().clamp(min=1e-8)
+        else:
+            l_recon = base.mean()
+
+        if mc_kw.get("composite_scope") == "lip_box":
+            y0, y1, x0, x1 = mc_kw["lip_box_fracs"]
+            sy, sx = lip_roi_slices(H, W, (y0, y1, x0, x1))
+            l_lip_only = F.huber_loss(
+                generated[:, :, sy, sx],
+                gt[:, :, sy, sx],
+                delta=self._huber_delta,
+                reduction="mean",
+            )
+        else:
+            mh = max(1, min(H - 1, int(H * self._mouth_blend_frac())))
+            l_lip_only = F.huber_loss(
+                generated[:, :, mh:, :],
+                gt[:, :, mh:, :],
+                delta=self._huber_delta,
+                reduction="mean",
+            )
+        return l_recon, l_lip_only
 
     # ------------------------------------------------------------------
     # Optimizer construction
@@ -149,11 +203,13 @@ class LipSyncTrainerCore:
             list(self.audio_encoder.parameters())
             + list(self.identity_encoder.parameters())
             + list(self.generator.parameters())
+            + list(self.syncnet.parameters())
         )
-        d_params = list(self.discriminator.parameters()) + list(self.syncnet.parameters())
+        d_params = list(self.discriminator.parameters())
 
         opt_name = oc.get("name", "adamw")
-        g_kwargs = {k: v for k, v in oc.items() if k != "name"}
+        skip = {"name", "gradient_clipping", "d_lr"}
+        g_kwargs = {k: v for k, v in oc.items() if k not in skip}
         g_kwargs.setdefault("lr", 2e-4)
 
         self.opt_g = build_optimizer(g_params, opt_name, **g_kwargs)
@@ -171,6 +227,21 @@ class LipSyncTrainerCore:
 
         self.scaler_g = GradScaler(enabled=self.config.get("fp16", True))
         self.scaler_d = GradScaler(enabled=self.config.get("fp16", True))
+
+    def _mouth_blend_frac(self) -> float:
+        return float(self.config.get("inference", {}).get("mouth_blend_from", 0.42))
+
+    def _audio_pool_mode(self) -> str:
+        return self.config.get("inference", {}).get("audio_embed_pool", "last")
+
+    def _mouth_composite_kw(self) -> dict[str, Any]:
+        """Same mouth compositing as inference (YAML ``inference`` block).
+
+        Using different train vs infer composite (e.g. lower-half blend vs lip-box paste)
+        lets the generator dump arbitrary RGB where blend alpha is low; paste inference
+        then shows a noisy mouth rectangle.
+        """
+        return mouth_composite_kwargs_from_inference(self.config.get("inference", {}))
 
     # ------------------------------------------------------------------
     # Training steps
@@ -191,32 +262,72 @@ class LipSyncTrainerCore:
 
         self.opt_g.zero_grad()
         with autocast(enabled=self.config.get("fp16", True)):
-            audio_emb = self.audio_encoder(mel)[:, -1]   # last frame embedding
+            audio_seq = self.audio_encoder(mel)
+            audio_emb = pool_audio_sequence(audio_seq, self._audio_pool_mode())
             identity_emb = self.identity_encoder(ref_face)
             rgb, alpha = self.generator(masked_face_with_ch, audio_emb, identity_emb)
 
-            # Composite generated lip patch over original frame
-            generated = alpha * rgb + (1 - alpha) * face
-
-            # Losses
-            l_recon = self.recon_loss(generated, gt)
-            fake_logits = self.discriminator(generated)
-            l_adv = self.adv_loss.generator_loss(fake_logits)
-            l_total = (
-                self.loss_weights["recon"] * l_recon
-                + self.loss_weights["adv"] * l_adv
+            mc_kw = self._mouth_composite_kw()
+            generated = composite_mouth_region(
+                face, rgb, alpha, self._mouth_blend_frac(), **mc_kw
             )
+
+            # Losses (mouth ROI–weighted recon so val_loss reflects lip quality)
+            l_recon, l_lip_huber = self._weighted_recon_and_lip_huber(generated, gt, mc_kw)
+            w_adv = float(self.loss_weights.get("adv", 1.0))
+            if w_adv > 0.0:
+                fake_logits = self.discriminator(generated)
+                l_adv = self.adv_loss.generator_loss(fake_logits)
+            else:
+                l_adv = torch.tensor(0.0, device=self.device)
+            l_total = self.loss_weights["recon"] * l_recon + w_adv * l_adv
             l_perc = torch.tensor(0.0, device=self.device)
             if self.perceptual_loss is not None and self.loss_weights["perceptual"] > 0:
                 l_perc = self.perceptual_loss(generated, gt)
                 l_total = l_total + self.loss_weights["perceptual"] * l_perc
+
+            l_sync = torch.tensor(0.0, device=self.device)
+            if batch.get("sync_lips") is not None and self.loss_weights["sync"] > 0:
+                sl = batch["sync_lips"].to(self.device)
+                mel_ch = mel.unsqueeze(1)
+                ae, ve = self.syncnet(mel_ch, sl)
+                l_sync = self.sync_loss(ae, ve)
+                l_total = l_total + self.loss_weights["sync"] * l_sync
+
+            l_temp = torch.tensor(0.0, device=self.device)
+            wt = self.loss_weights["temporal"]
+            if wt > 0 and generated.shape[-1] > 1:
+                dh_g = generated[:, :, :, 1:] - generated[:, :, :, :-1]
+                dh_t = gt[:, :, :, 1:] - gt[:, :, :, :-1]
+                l_temp = torch.nn.functional.l1_loss(dh_g, dh_t.detach())
+                l_total = l_total + wt * l_temp
+
+            l_mouth_a = torch.tensor(0.0, device=self.device)
+            w_ma = float(self.loss_weights.get("w_mouth_alpha", 0.0))
+            if w_ma > 0.0:
+                _, _, H, W = face.shape
+                tgt = float(self.config.get("losses", {}).get("mouth_alpha_target", 0.25))
+                scope = mc_kw.get("composite_scope", "lower_half")
+                if scope == "lip_box":
+                    y0, y1, x0, x1 = mc_kw["lip_box_fracs"]
+                    sy, sx = lip_roi_slices(H, W, (y0, y1, x0, x1))
+                    a_zone = alpha[:, :, sy, sx]
+                else:
+                    mh = max(1, min(H - 1, int(H * self._mouth_blend_frac())))
+                    a_zone = alpha[:, :, mh:, :]
+                l_mouth_a = torch.nn.functional.relu(
+                    torch.as_tensor(tgt, device=face.device, dtype=alpha.dtype) - a_zone
+                ).mean()
+                l_total = l_total + w_ma * l_mouth_a
 
         self.scaler_g.scale(l_total).backward()
         if self.config.get("gradient_clipping", {}).get("enabled", True):
             self.scaler_g.unscale_(self.opt_g)
             torch.nn.utils.clip_grad_norm_(
                 list(self.audio_encoder.parameters())
-                + list(self.generator.parameters()),
+                + list(self.identity_encoder.parameters())
+                + list(self.generator.parameters())
+                + list(self.syncnet.parameters()),
                 self.config.get("gradient_clipping", {}).get("max_norm", 1.0),
             )
         self.scaler_g.step(self.opt_g)
@@ -225,8 +336,12 @@ class LipSyncTrainerCore:
         return {
             "g_total": l_total.item(),
             "g_recon": l_recon.item(),
+            "g_recon_lip": l_lip_huber.item(),
             "g_perc": l_perc.item(),
             "g_adv": l_adv.item(),
+            "g_sync": l_sync.item(),
+            "g_temp": l_temp.item(),
+            "g_mouth_a": l_mouth_a.item(),
         }
 
     def _d_step(self, batch: dict) -> dict[str, float]:
@@ -242,10 +357,14 @@ class LipSyncTrainerCore:
         self.opt_d.zero_grad()
         with autocast(enabled=self.config.get("fp16", True)):
             with torch.no_grad():
-                audio_emb = self.audio_encoder(mel)[:, -1]
+                audio_seq = self.audio_encoder(mel)
+                audio_emb = pool_audio_sequence(audio_seq, self._audio_pool_mode())
                 identity_emb = self.identity_encoder(ref_face)
                 rgb, alpha = self.generator(masked_face_4ch, audio_emb, identity_emb)
-                generated = alpha * rgb + (1 - alpha) * face
+                mc_kw = self._mouth_composite_kw()
+                generated = composite_mouth_region(
+                    face, rgb, alpha, self._mouth_blend_frac(), **mc_kw
+                )
 
             real_logits = self.discriminator(gt)
             fake_logits = self.discriminator(generated.detach())
@@ -316,10 +435,12 @@ class LipSyncTrainerCore:
             self.identity_encoder.train()
             self.generator.train()
             self.discriminator.train()
+            self.syncnet.train()
 
             epoch_logs: dict[str, float] = {}
+            train_disc = float(self.loss_weights.get("adv", 1.0)) > 0.0
             for batch_idx, batch in enumerate(train_loader):
-                d_logs = self._d_step(batch)
+                d_logs = self._d_step(batch) if train_disc else {"d_loss": 0.0}
                 g_logs = self._g_step(batch)
                 step_logs = {**d_logs, **g_logs}
                 for k, v in step_logs.items():
@@ -350,6 +471,7 @@ class LipSyncTrainerCore:
         self.audio_encoder.eval()
         self.generator.eval()
         self.identity_encoder.eval()
+        self.syncnet.eval()
         totals: dict[str, float] = {}
         for batch in loader:
             mel = batch["mel"].to(self.device)
@@ -361,28 +483,39 @@ class LipSyncTrainerCore:
             masked_face[:, :, face.shape[-2] // 2 :, :] = 0.0
             masked_face_4ch = torch.cat([masked_face, torch.zeros_like(masked_face[:, :1])], dim=1)
 
-            audio_emb = self.audio_encoder(mel)[:, -1]
+            audio_seq = self.audio_encoder(mel)
+            audio_emb = pool_audio_sequence(audio_seq, self._audio_pool_mode())
             identity_emb = self.identity_encoder(ref_face)
             rgb, alpha = self.generator(masked_face_4ch, audio_emb, identity_emb)
-            generated = alpha * rgb + (1 - alpha) * face
-            val_loss = self.recon_loss(generated, gt).item()
-            totals["val_loss"] = totals.get("val_loss", 0.0) + val_loss
+            mc_kw = self._mouth_composite_kw()
+            generated = composite_mouth_region(
+                face, rgb, alpha, self._mouth_blend_frac(), **mc_kw
+            )
+            val_w, val_lip = self._weighted_recon_and_lip_huber(generated, gt, mc_kw)
+            totals["val_loss"] = totals.get("val_loss", 0.0) + val_w.item()
+            totals["val_lip_huber"] = totals.get("val_lip_huber", 0.0) + val_lip.item()
 
-        return {k: v / len(loader) for k, v in totals.items()}
+        n = len(loader)
+        return {k: v / n for k, v in totals.items()}
 
     def save_checkpoint(self, path: str | Path) -> None:
         """Save full model state to *path*."""
+        from copy import deepcopy
+
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        cfg = deepcopy(self.config)
+        cfg["inference"] = merge_inference_defaults(cfg.get("inference"))
         payload = {
             "audio_encoder": self.audio_encoder.state_dict(),
             "identity_encoder": self.identity_encoder.state_dict(),
             "generator": self.generator.state_dict(),
             "discriminator": self.discriminator.state_dict(),
+            "syncnet": self.syncnet.state_dict(),
             "opt_g": self.opt_g.state_dict(),
             "opt_d": self.opt_d.state_dict(),
-            "config": self.config,
-            "meta": make_metadata(self.config),
+            "config": cfg,
+            "meta": make_metadata(cfg),
         }
         torch.save(payload, path)
 
@@ -395,6 +528,9 @@ class LipSyncTrainerCore:
         self.identity_encoder.load_state_dict(ckpt["identity_encoder"])
         self.generator.load_state_dict(ckpt["generator"])
         self.discriminator.load_state_dict(ckpt["discriminator"])
+        if "syncnet" in ckpt:
+            self.syncnet.load_state_dict(ckpt["syncnet"])
+        self._loaded_checkpoint_path = Path(path).resolve()
         if "opt_g" in ckpt:
             self.opt_g.load_state_dict(ckpt["opt_g"])
         if "opt_d" in ckpt:

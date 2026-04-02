@@ -1,0 +1,107 @@
+# ---------------------------------------------------------------------------
+# WARNING: synthetic / memorisation training ONLY (NOT for real lip-sync).
+# w_adv: 0 teaches shortcuts that do not generalise to photos + speech.
+# For GRID / real talking heads use configs/base.yaml (or merge w_recon only briefly).
+# ---------------------------------------------------------------------------
+
+model:
+  n_mels: 80
+  audio_d_model: 256
+  audio_heads: 4
+  audio_layers: 6
+  audio_embed_dim: 512
+  identity_embed_dim: 512
+  pretrained_identity: true
+  gen_in_channels: 4
+  gen_base_ch: 64
+  gen_depth: 4
+  disc_in_channels: 3
+  disc_base_ch: 64
+  sync_embed_dim: 256
+
+audio:
+  sample_rate: 16000
+  n_mels: 80
+  window: 16
+
+video:
+  face_size: 256
+  lip_size: 96
+  target_fps: 25.0
+
+lipsync:
+  sync_window: 5
+  temporal_radius: 2
+  mouth_region_weight: 1.0
+
+inference:
+  smoothing: 0.0
+  paste_mode: direct
+  keep_original_audio: true
+  mux_driving_audio: true
+  mouth_blend_from: 0.42
+  audio_embed_pool: last
+  mouth_composite_mode: blend
+  mouth_composite_scope: lip_box
+  lip_roi_y0: 0.52
+  lip_roi_y1: 0.86
+  lip_roi_x0: 0.22
+  lip_roi_x1: 0.78
+  lip_roi_feather_px: 0
+  mouth_alpha_min: 0.45
+
+optimizer:
+  name: adamw
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  betas: [0.9, 0.999]
+  gradient_clipping:
+    enabled: true
+    max_norm: 1.0
+    norm_type: 2
+
+scheduler:
+  name: warmup_cosine
+  warmup_steps: 500
+  T_max: 100000
+  eta_min: 1.0e-6
+
+losses:
+  huber_delta: 1.0
+  lip_recon_boost: 12.0
+  perceptual_layers: [relu3_3, relu4_3]
+  adv_mode: hinge
+  w_recon: 40.0
+  w_perceptual: 1.0
+  w_sync: 0.0
+  w_temporal: 0.15
+  w_adv: 0.0
+  w_mouth_alpha: 0.15
+  mouth_alpha_target: 0.3
+
+epochs: 120
+batch_size: 8
+fp16: false
+gradient_checkpointing: false
+
+data:
+  audio_window: 16
+  face_size: 256
+  lip_size: 96
+  static_face_prob: 1.0
+  augment: true
+  num_workers: 0
+
+use_super_resolution: false
+sr_backend: gfpgan
+
+checkpoint_dir: checkpoints_synth
+log_wandb: false
+save_every_n_epochs: 5
+deterministic: true
+seed: 42
+
+runtime:
+  profile: cpu-safe
+  prefer_onnx: false
+  use_torchscript: false

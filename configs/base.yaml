@@ -50,6 +50,24 @@ inference:
   smoothing: 0.0
   paste_mode: direct            # direct | seamless
   keep_original_audio: true
+  # After batch infer, mux driving WAV (or audio from video) into output MP4 via ffmpeg.
+  mux_driving_audio: true
+  # Rows above this fraction of face height stay original (no generator blend).
+  mouth_blend_from: 0.42
+  # Pool Conformer time axis: last = frame-aligned (recommended); mean averages the window.
+  audio_embed_pool: last        # mean | last
+  # paste: raw generator RGB in ROI — often looks like a noise rectangle if the G is weak.
+  # blend: alpha*rgb + (1-alpha)*face (recommended; matches generator sigmoid alpha head).
+  mouth_composite_mode: blend
+  # lip_box = only central mouth ROI (Wav2Lip-style); lower_half = legacy full lower face.
+  mouth_composite_scope: lip_box
+  lip_roi_y0: 0.52
+  lip_roi_y1: 0.86
+  lip_roi_x0: 0.22
+  lip_roi_x1: 0.78
+  # Edge blend width (pixels) on the lip ROI; softens the box boundary on 256² crops.
+  lip_roi_feather_px: 6
+  mouth_alpha_min: 0.45
 
 # ---------------------------------------------------------------------------
 # Optimizer
@@ -80,15 +98,22 @@ scheduler:
 # ---------------------------------------------------------------------------
 losses:
   huber_delta: 1.0
+  # Extra Huber weight on lip ROI pixels (lip_box composite). Stops "good" full-frame val_loss
+  # while the mouth patch is still noise. See Wav2Lip-style strong L1 on the synthesized region.
+  lip_recon_boost: 14.0
   perceptual_layers: [relu3_3, relu4_3]
   adv_mode: hinge             # hinge | lsgan | bce | wgan
 
   # Loss weights
   w_recon: 10.0
-  w_perceptual: 1.0
-  w_sync: 0.5
+  # Lower than 1.0: perceptual alone can favor texture over correct lip pixels (blur / garbage in ROI).
+  w_perceptual: 0.45
+  w_sync: 0.35
   w_temporal: 0.1
   w_adv: 1.0
+  # Penalise low alpha in the lower face (stops "invisible" generator / static mouth).
+  w_mouth_alpha: 0.12
+  mouth_alpha_target: 0.28
 
 # ---------------------------------------------------------------------------
 # Training
@@ -107,6 +132,9 @@ data:
   audio_window: 16            # mel frames per sample
   face_size: 256
   lip_size: 96
+  # During training, with this probability use frame-0 as driving face input.
+  # Improves one-image (static portrait) lip-sync instead of only video-to-video.
+  static_face_prob: 0.7
   augment: true
   num_workers: 4
 
