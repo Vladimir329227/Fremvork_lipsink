@@ -1,0 +1,12 @@
+[
+  {
+    "video": "path/to/first_face.mp4",
+    "audio": "path/to/first_speech.wav",
+    "output": "out/first_lipsync.mp4"
+  },
+  {
+    "video": "path/to/second_face.mp4",
+    "audio": "path/to/second_speech.wav",
+    "output": "out/second_lipsync.mp4"
+  }
+]
